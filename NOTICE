@@ -1,0 +1,60 @@
+RadarServe
+Copyright 2026 <版权所有者>
+
+本产品包含由阿里巴巴达摩院开发的软件（https://github.com/alibaba-damo-academy/damo-radar），
+遵循 Apache License 2.0 授权。
+
+---
+
+## 上游声明
+
+RadarServe 与阿里巴巴达摩院无隶属关系，是独立的第三方服务化实现。
+
+核心模型、推理逻辑与网络定义来自上游项目 DAMO RADAR：
+
+    DAMO RADAR
+    https://github.com/alibaba-damo-academy/damo-radar
+    Licensed under the Apache License 2.0
+
+上游代码原样保留在仓库的 `DAMO-RADAR/` 目录下，其版权与许可声明未被修改。
+使用本项目的模型能力开展研究时，请引用原始论文：
+
+    @article{damo-radar-2026,
+        title = {An expert-level generalist AI for abdominal CT diagnosis},
+        journal = {Science},
+        volume = {393}, number = {6817}, pages = {eaec6129}, year = {2026},
+        doi = {10.1126/science.aec6129}
+    }
+
+---
+
+## 第三方开源组件
+
+本项目打包或派生自以下开源软件，各组件遵循其原始许可：
+
+    LAVIS                      BSD 3-Clause License
+      https://github.com/salesforce/LAVIS
+
+    nnU-Net                    Apache License 2.0
+      https://github.com/MIC-DKFZ/nnUNet
+
+    MONAI                      Apache License 2.0
+      https://github.com/Project-MONAI/MONAI
+
+    3D-ResNets-PyTorch         MIT License
+      https://github.com/kenshohara/3D-ResNets-PyTorch
+
+完整许可文本保留在 `DAMO-RADAR/THIRD_PARTY_LICENSES.md`。
+
+---
+
+## 模型权重
+
+**模型权重不随本仓库或构建产物分发。**
+
+部署时通过 `webapp/deploy/deploy.sh --download-ckpt` 从 HuggingFace
+(https://huggingface.co/radar-generalist) 下载，适用其自身的许可条款
+（上游模型卡标注为 CC BY-NC-SA 4.0，即非商业性使用）。
+
+将模型权重用于商业目的前，请与原始作者确认授权情况。本项目的 Apache 2.0
+许可仅覆盖 `webapp/` 下的服务化代码，不改变上游模型与数据的许可条件。

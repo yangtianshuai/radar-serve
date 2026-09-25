@@ -1,0 +1,32 @@
+# 镜像只需要三部分：DAMO-RADAR/RADAR_inference、webapp/backend、webapp/frontend。
+# 其余一律排除，避免把权重与数据集（合计数百 MB）传进构建上下文。
+
+.git
+.gitattributes
+.codebuddy/
+
+# DAMO-RADAR 下只有 RADAR_inference 需要进镜像（训练/数据/文档/下载脚本都不需要）
+DAMO-RADAR/ckpt/
+DAMO-RADAR/data/
+DAMO-RADAR/results/
+DAMO-RADAR/RADAR_train/
+DAMO-RADAR/docs/
+DAMO-RADAR/download_scripts/
+DAMO-RADAR/README.md
+DAMO-RADAR/requirements.txt
+DAMO-RADAR/THIRD_PARTY_LICENSES.md
+
+# 运行时数据与服务日志
+webapp/runtime/
+webapp/backend/*.log
+webapp/backend/*.err
+
+# 前端依赖与构建产物（镜像内会重新安装并构建）
+webapp/frontend/node_modules/
+webapp/frontend/dist/
+
+# 虚拟环境与 Python 缓存
+.venv/
+.venv_preview/
+**/__pycache__/
+**/*.pyc

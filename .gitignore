@@ -1,0 +1,36 @@
+__pycache__
+*.pyc
+*.pyo
+*.pth
+# *.nii.gz
+# *.csv
+# *.json
+*.bin
+*.safetensors
+training_results
+bert-base-chinese
+bert-base-uncased
+merlin_labels.json
+merlin_report.json
+.vscode
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- webapp 服务 ----
+.venv/
+.venv_preview/
+webapp/runtime/
+webapp/frontend/dist/
+webapp/frontend/node_modules/
+webapp/backend/*.log
+webapp/backend/*.err
+webapp/frontend/*.log
+webapp/demo/*.log
+webapp/demo/*.err
+
+# ---- 上游示例数据（约 324 MB，属第三方数据，不入库）----
+# 需要时按 DAMO-RADAR/docs/INFERENCE.md 的说明从上游仓库获取
+DAMO-RADAR/data/
+# 上游 demo 的推理输出结果
+DAMO-RADAR/results/

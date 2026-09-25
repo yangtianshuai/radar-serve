@@ -1,0 +1,8 @@
+merlin_report.json filter=lfs diff=lfs merge=lfs -text
+
+# 部署脚本会在 Linux / macOS 上以 bash 执行，必须保持 LF：
+# 一旦被 checkout 成 CRLF，bash 会报 "\r: command not found"，而且报错信息
+# 完全指不到根因（脚本注释里也提醒过这个坑）
+*.sh text eol=lf
+# PowerShell 脚本按 Windows 习惯走 CRLF
+*.ps1 text eol=crlf

@@ -1,0 +1,36 @@
+services:
+  radarserve:
+    build:
+      context: ../..
+      dockerfile: webapp/deploy/Dockerfile
+    image: radarserve:latest
+    container_name: radarserve
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      # 模型权重（HuggingFace 下载到 DAMO-RADAR/ckpt），只读挂载
+      - ../../DAMO-RADAR/ckpt:/ckpt:ro
+      - radarserve-data:/data
+    environment:
+      MODEL_ROOT: /ckpt
+      CONFIGS_ROOT: /ckpt
+      RADAR_DATA_DIR: /data
+      RADAR_DEVICE: cuda
+      RADAR_MAX_UPLOAD_MB: "2048"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+
+volumes:
+  radarserve-data:
