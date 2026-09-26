@@ -40,6 +40,7 @@ webapp/
 │   └── requirements.txt
 ├── frontend/             React + TypeScript + Vite
 └── deploy/               Dockerfile / docker-compose / start.sh
+                           deploy_gui.py    图形化部署助手（本机 → 服务器）
 ```
 
 ## 3. 前置条件

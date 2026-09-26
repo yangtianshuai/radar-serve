@@ -32,11 +32,17 @@ function Warn($m) { Write-Host "[WARN] $m" -ForegroundColor Yellow }
 function Fail($m) { Write-Host "[FAIL] $m" -ForegroundColor Red }
 function Step($m) { Write-Host "`n==> $m" -ForegroundColor White }
 
-$RequiredCkpt = @(
+# 需要从 HuggingFace 下载的主权重
+$HfCkpt = @(
     'checkpoint_radar_pretrain.pth',
-    'infer_text_embedding_radar.pt',
     'bert-base-chinese\config.json'
 )
+# 随本仓库分发的模型资产。HuggingFace 上没有这个文件（体积约 0.33 MB），
+# 缺了只可能是仓库内容不完整，下载救不了——详见 DEPLOYMENT.md §2.2
+$RepoCkpt = @(
+    'infer_text_embedding_radar.pt'
+)
+$RequiredCkpt = $HfCkpt + $RepoCkpt
 
 # --------------------------------------------------------------- checkpoints
 function Get-MissingCkpt {
@@ -50,6 +56,14 @@ function Ensure-Ckpt {
 
     Warn 'Missing files:'
     $missing | ForEach-Object { Write-Host "         $_" }
+
+    $repoMissing = @($RepoCkpt | Where-Object { -not (Test-Path (Join-Path $CkptDir $_)) })
+    if ($repoMissing) {
+        Write-Host "错误：$($repoMissing -join ', ') 属于随本仓库分发的模型资产，HuggingFace 上没有，" -ForegroundColor Red
+        Write-Host "      下载无法补齐。请从项目仓库的 DAMO-RADAR\ckpt\ 拷贝到 $CkptDir\" -ForegroundColor Red
+        throw 'Incomplete repository assets, aborted'
+    }
+
     if (-not $DownloadCkpt) {
         Write-Host @"
 
@@ -70,14 +84,22 @@ Or download manually:
     Push-Location $DamoRadarDir
     try {
         & $py -c @"
+import os
+
+# Xet 存储：hf-mirror 等镜像不支持（401），国内也连不上 cas-server.xethub.hf.co
+os.environ.setdefault('HF_HUB_DISABLE_XET', '1')
+# 空串的 HF_ENDPOINT 会让 huggingface_hub 拼出缺协议的 URL
+if not os.environ.get('HF_ENDPOINT', '').strip():
+    os.environ.pop('HF_ENDPOINT', None)
+
 from huggingface_hub import snapshot_download
+
 snapshot_download(
     repo_id='radar-generalist/RADAR',
     repo_type='model',
     local_dir='./ckpt',
     allow_patterns=[
         'checkpoint_radar_pretrain.pth',
-        'infer_text_embedding_radar.pt',
         'bert-base-chinese/*',
     ],
 )

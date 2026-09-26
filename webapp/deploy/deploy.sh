@@ -30,11 +30,18 @@ PORT="${PORT:-8000}"
 #: 官方开源项目目录（RADAR_inference / ckpt / download_scripts 都在其下）
 DAMO_RADAR_DIR="${DAMO_RADAR_DIR:-$ROOT/DAMO-RADAR}"
 CKPT_DIR="${MODEL_ROOT:-$DAMO_RADAR_DIR/ckpt}"
-REQUIRED_CKPT=(
+#: 需要从 HuggingFace 下载的主权重（仓库 radar-generalist/RADAR 里确实有这些文件）
+HF_CKPT=(
   "checkpoint_radar_pretrain.pth"
-  "infer_text_embedding_radar.pt"
   "bert-base-chinese/config.json"
 )
+#: 随本仓库一起分发的模型资产。**HuggingFace 上没有这个文件**（体积很小，
+#: 约 0.33 MB，属上游发布的一部分），所以自动下载救不了它——缺了只可能是
+#: 仓库内容不完整，比如 git clone 没拉全，或部署打包时漏掉了 DAMO-RADAR/ckpt/。
+REPO_CKPT=(
+  "infer_text_embedding_radar.pt"
+)
+REQUIRED_CKPT=("${HF_CKPT[@]}" "${REPO_CKPT[@]}")
 
 # ---------------------------------------------------------------- 输出工具
 c_ok()   { printf '\033[32m[ OK ]\033[0m %s\n' "$*"; }
@@ -52,6 +59,186 @@ missing_ckpt() {
   done
 }
 
+#: 下载脚本内容，写进临时文件后由宿主机或容器执行。直接用 snapshot_download
+#: 而不是仓库里的 download_checkpoints.py，是为了绕开后者在
+#: huggingface_hub>=0.23 已废弃的 local_dir_use_symlinks 参数——那个脚本在新
+#: 版本上会直接 TypeError。
+write_download_script() {
+  cat > "$1" <<'PY'
+import os
+
+# Xet 是 HuggingFace 新的内容寻址存储，大文件会改走 cas-server.xethub.hf.co。
+# hf-mirror.com 这类镜像并不支持它（直接 401 Unauthorized），国内网络也基本
+# 连不上那个域名。除非调用方显式指定，一律禁用，回退到传统 LFS 下载。
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+
+# HF_ENDPOINT 被设成**空串**时（`export HF_ENDPOINT=`，或 docker 的
+# `-e HF_ENDPOINT=`），huggingface_hub 会拿空字符串当端点，拼出
+# `/api/models/...` 这种没有协议的 URL，抛 UnsupportedProtocol——
+# 真实原因埋在 traceback 最深处，极难排查。这里直接清掉让它回退到默认端点。
+if not os.environ.get("HF_ENDPOINT", "").strip():
+    os.environ.pop("HF_ENDPOINT", None)
+
+# 注意：这些环境变量必须在 import huggingface_hub 之前设好，模块导入时就会求值
+from huggingface_hub import snapshot_download  # noqa: E402
+
+print(
+    "HF endpoint: "
+    + (os.environ.get("HF_ENDPOINT") or "https://huggingface.co")
+    + " | xet: "
+    + ("off" if os.environ.get("HF_HUB_DISABLE_XET") == "1" else "on"),
+    flush=True,
+)
+
+snapshot_download(
+    repo_id="radar-generalist/RADAR",
+    repo_type="model",
+    local_dir="./ckpt",
+    allow_patterns=[
+        "checkpoint_radar_pretrain.pth",
+        "infer_text_embedding_radar.pt",
+        "bert-base-chinese/*",
+    ],
+)
+print("download done")
+PY
+}
+
+pip_usable() { python3 -m pip --version >/dev/null 2>&1; }
+
+# 让宿主机 python3 具备 pip。Debian/Ubuntu 的 python3 不带 pip、还移除了
+# ensurepip（都是独立包），云主机上极常见，所以这里必须能自己救回来。
+ensure_pip() {
+  if pip_usable; then
+    c_ok "pip 可用"
+    return 0
+  fi
+
+  c_warn "宿主机 python3 没有 pip 模块，尝试自动补齐"
+
+  python3 -m ensurepip --default-pip >/dev/null 2>&1 || true
+  if pip_usable; then
+    c_ok "已通过 ensurepip 装好 pip"
+    return 0
+  fi
+
+  # 官方引导脚本：不依赖系统包管理器，也不需要 root
+  local tmp
+  tmp="$(mktemp -d)"
+  if curl -fsSL --connect-timeout 20 https://bootstrap.pypa.io/get-pip.py -o "$tmp/get-pip.py" 2>/dev/null \
+     || wget -q --timeout=20 -O "$tmp/get-pip.py" https://bootstrap.pypa.io/get-pip.py 2>/dev/null; then
+    python3 "$tmp/get-pip.py" --user --quiet >/dev/null 2>&1 || true
+  fi
+  rm -rf "$tmp"
+
+  if pip_usable; then
+    c_ok "已通过 get-pip.py 装好 pip"
+    return 0
+  fi
+
+  c_err "无法自动安装 pip。请在服务器上手动执行其一后重新部署："
+  c_err "  Debian/Ubuntu : sudo apt-get update && sudo apt-get install -y python3-pip"
+  c_err "  RHEL / CentOS : sudo yum install -y python3-pip"
+  c_err "  通用          : curl -fsSL https://bootstrap.pypa.io/get-pip.py | python3 - --user"
+  return 1
+}
+
+#: 容器下载通道用的镜像
+DOWNLOAD_IMAGE="python:3.11-slim"
+
+# 在容器里跑一次下载。endpoint 为空时**不传** HF_ENDPOINT，让容器用官方默认值：
+# 传空串会让 huggingface_hub 拼出缺协议的 URL（见上面 write_download_script 的说明）。
+container_download_once() {
+  local script="$1" endpoint="${2:-}"
+  local -a env_args=()
+  if [[ -n "$endpoint" ]]; then
+    env_args+=(-e "HF_ENDPOINT=$endpoint")
+  fi
+
+  # --user 让容器以当前用户身份写文件：否则 ckpt 归 root，之后服务以非 root
+  # 运行时读不了。HOME 指到 /tmp，pip --user 才有地方落盘。
+  docker run --rm \
+    --user "$(id -u):$(id -g)" \
+    -e HOME=/tmp \
+    ${env_args[@]+"${env_args[@]}"} \
+    -v "$DAMO_RADAR_DIR:/work" \
+    -v "$script:/dl.py:ro" \
+    -w /work \
+    "$DOWNLOAD_IMAGE" \
+    bash -c 'pip install -q --user huggingface_hub && python /dl.py'
+}
+
+# 备用通道：借容器里的 pip 下载权重，宿主机一个包都不用装
+download_via_container() {
+  command -v docker >/dev/null 2>&1 || return 1
+  docker info >/dev/null 2>&1 || return 1
+
+  local tmp
+  tmp="$(mktemp -d)"
+  write_download_script "$tmp/dl.py"
+
+  c_info "改用容器下载权重（镜像 $DOWNLOAD_IMAGE，宿主机无需 pip）"
+  if [[ -n "${HF_ENDPOINT:-}" ]]; then
+    c_info "容器内 HF 端点：$HF_ENDPOINT"
+  fi
+
+  if container_download_once "$tmp/dl.py" "${HF_ENDPOINT:-}"; then
+    rm -rf "$tmp"
+    return 0
+  fi
+
+  # 官方端点失败就换镜像再试一次。容器与宿主机的网络可达性未必一致
+  # （比如宿主机配了代理而容器没有），所以不能只凭前面那次探测下结论。
+  if [[ "${HF_ENDPOINT:-}" != *"hf-mirror"* ]]; then
+    c_warn "容器下载失败，改用镜像重试：$HF_MIRROR_ENDPOINT"
+    if container_download_once "$tmp/dl.py" "$HF_MIRROR_ENDPOINT"; then
+      rm -rf "$tmp"
+      return 0
+    fi
+  fi
+
+  rm -rf "$tmp"
+  return 1
+}
+
+#: 社区维护的 HuggingFace 镜像。国内直连 huggingface.co 基本不可达，而且失败
+#: 方式是长时间挂起而不是立刻报错，用户很容易误判成"卡死"。
+HF_MIRROR_ENDPOINT="https://hf-mirror.com"
+
+# 没显式指定端点时先探一次连通性，不通就自动切镜像
+pick_hf_endpoint() {
+  if [[ -n "${HF_ENDPOINT:-}" ]]; then
+    c_info "HF 端点（外部指定）：$HF_ENDPOINT"
+    return 0
+  fi
+
+  if curl -fsS --connect-timeout 6 -o /dev/null https://huggingface.co/ 2>/dev/null; then
+    c_ok "huggingface.co 直连可用"
+    return 0
+  fi
+
+  export HF_ENDPOINT="$HF_MIRROR_ENDPOINT"
+  c_warn "huggingface.co 连不上，已自动改用镜像：$HF_ENDPOINT"
+  c_warn "若镜像也不通，说明这台机器访问不了公网，请配好代理再试"
+}
+
+# 下载权重；直连失败时自动换镜像重试一次
+download_weights() {
+  local script="$1"
+
+  if ( cd "$DAMO_RADAR_DIR" && python3 "$script" ); then
+    return 0
+  fi
+
+  if [[ "${HF_ENDPOINT:-}" != *"hf-mirror"* ]]; then
+    export HF_ENDPOINT="$HF_MIRROR_ENDPOINT"
+    c_warn "下载失败，改用镜像重试：$HF_ENDPOINT"
+    ( cd "$DAMO_RADAR_DIR" && python3 "$script" )
+    return $?
+  fi
+  return 1
+}
+
 ensure_ckpt() {
   step "检查模型权重"
   local missing
@@ -64,6 +251,20 @@ ensure_ckpt() {
 
   c_warn "缺少以下文件："
   echo "$missing" | sed 's/^/         /'
+
+  # 先把「随仓库分发」的那几个挑出来单独处理：它们在 HuggingFace 上不存在，
+  # 提示用户去下载只会白折腾一轮（下完仍然缺，报错也看不懂为什么）
+  local repo_missing="" f
+  for f in "${REPO_CKPT[@]}"; do
+    [[ -f "$CKPT_DIR/$f" ]] || repo_missing="$repo_missing $f"
+  done
+
+  if [[ -n "$repo_missing" ]]; then
+    c_err "其中$repo_missing 属于**随本仓库分发**的模型资产，HuggingFace 上没有，"
+    c_err "下载无法补齐。请从项目仓库的 DAMO-RADAR/ckpt/ 拷贝到 $CKPT_DIR/"
+    c_err "（用「图形化部署助手」上传代码会自动带上它，见 webapp/doc/DEPLOYMENT.md §3.2）"
+    die "仓库内容不完整，已中止"
+  fi
 
   if [[ "$DOWNLOAD_CKPT" -eq 0 ]]; then
     cat <<EOF
@@ -80,26 +281,33 @@ EOF
 
   step "从 HuggingFace 下载权重"
   command -v python3 >/dev/null 2>&1 || die "未找到 python3"
-  python3 -m pip install --quiet --upgrade "huggingface_hub" \
-    || die "huggingface_hub 安装失败"
+  pick_hf_endpoint
 
-  # 直接内联调用 snapshot_download，绕开 download_checkpoints.py 中
-  # 在 huggingface_hub>=0.23 已废弃的 local_dir_use_symlinks 参数
-  ( cd "$DAMO_RADAR_DIR" && python3 - <<'PY'
-from huggingface_hub import snapshot_download
-snapshot_download(
-    repo_id="radar-generalist/RADAR",
-    repo_type="model",
-    local_dir="./ckpt",
-    allow_patterns=[
-        "checkpoint_radar_pretrain.pth",
-        "infer_text_embedding_radar.pt",
-        "bert-base-chinese/*",
-    ],
-)
-print("download done")
-PY
-  ) || die "权重下载失败，请检查网络或改用代理"
+  local dl_script
+  dl_script="$(mktemp)"
+  write_download_script "$dl_script"
+
+  if pip_usable || ensure_pip; then
+    # --user 优先：不需要 root，也不污染系统 site-packages；装不上再退回
+    # 系统级（少数发行版禁用了 --user）。pypi 慢的话可先设：
+    #   export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+    if ! python3 -m pip install --quiet --user --upgrade huggingface_hub >/dev/null 2>&1 \
+       && ! python3 -m pip install --quiet --upgrade huggingface_hub >/dev/null 2>&1; then
+      rm -f "$dl_script"
+      c_err "huggingface_hub 安装失败，可手动执行后重试："
+      c_err "  python3 -m pip install --user huggingface_hub"
+      die "依赖安装失败"
+    fi
+
+    download_weights "$dl_script" \
+      || { rm -f "$dl_script"; die "权重下载失败。上方 traceback 的最后一行才是真实原因"; }
+  elif download_via_container; then
+    : # 容器通道已完成下载
+  else
+    rm -f "$dl_script"
+    die "无法下载权重：宿主机没有 pip，容器通道也不可用（原因见上方提示）"
+  fi
+  rm -f "$dl_script"
 
   missing="$(missing_ckpt)"
   [[ -z "$missing" ]] || die "下载后仍缺少：$missing"
@@ -131,6 +339,10 @@ check_docker() {
 
 check_native() {
   command -v python3 >/dev/null 2>&1 || die "未找到 python3"
+  # venv 在 Debian/Ubuntu 上同样是独立包（python3-venv），缺失时会在建虚拟环境
+  # 那一步才报错，而那时已经走到依赖安装中途，提前查出来更省事
+  python3 -m venv --help >/dev/null 2>&1 \
+    || die "python3 缺少 venv 模块，请先安装：sudo apt-get install -y python3-venv"
   local pyver
   pyver="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
   case "$pyver" in
@@ -205,9 +417,11 @@ install_torch() {
   fi
 
   # torch 需按服务器 CUDA 版本选择轮子，装错版本会在启动时才暴露
-  c_info "安装 torch（CUDA 12.1 轮子）..."
   c_warn "若服务器 CUDA 版本不是 12.1，请自行替换下方 index-url，例如 cu118 / cu124"
-  python -m pip install --quiet torch==2.4.0+cu121 \
+  c_info "安装 torch 2.4.0+cu121（轮子约 2.5 GB，视网络可能数分钟到数十分钟）"
+  # 刻意不加 --quiet：这是整个部署里最大的一笔下载，必须让进度露出来，
+  # 否则界面长时间毫无动静，会被当成卡死
+  python -m pip install torch==2.4.0+cu121 \
     --index-url https://download.pytorch.org/whl/cu121
 }
 

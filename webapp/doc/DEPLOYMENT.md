@@ -64,11 +64,13 @@ cd damo-radar
 
 服务需要**三个**文件，缺任何一个都起不来（`config.ensure_ckpt_ready()` 会检查）：
 
-| 文件 | 内容 |
-| --- | --- |
-| `ckpt/checkpoint_radar_pretrain.pth` | 主权重 |
-| `ckpt/infer_text_embedding_radar.pt` | 文本侧预编码向量 |
-| `ckpt/bert-base-chinese/` | 中文 BERT，**整个目录**（config + 权重 + 词表） |
+| 文件 | 内容 | 来源 |
+| --- | --- | --- |
+| `ckpt/checkpoint_radar_pretrain.pth` | 主权重 | HuggingFace 下载 |
+| `ckpt/bert-base-chinese/` | 中文 BERT，**整个目录**（config + 权重 + 词表） | HuggingFace 下载 |
+| `ckpt/infer_text_embedding_radar.pt` | 文本侧预编码向量（约 0.33 MB） | **随本仓库分发** |
+
+⚠️ **最后那个文本 embedding 不在 HuggingFace 仓库里**（核对过 `radar-generalist/RADAR` 的全部 20 个文件，没有它）。它是随项目仓库一起提供的模型资产，见根目录 `README.md` 的「模型资产」说明。所以**自动下载救不了它**——一旦缺失，多半是仓库内容不完整（`git clone` 没拉全，或打包时漏掉了 `DAMO-RADAR/ckpt/`）。`deploy.sh` 会把这类文件单独识别出来并说明，不会误导你去下载。
 
 ```bash
 pip install "huggingface_hub<0.23"
@@ -134,11 +136,56 @@ macOS 没有 NVIDIA GPU，CUDA 轮子也没有 macOS 发行版，脚本对此做
 
 ⚠️ **macOS 只能用于功能验证与界面联调**。RADAR 是 3D 滑窗推理（`ROI=(96,256,384)` + 最多 18 次补推），CPU 上单例耗时可达数十分钟。真实分析请部署到 Linux GPU 服务器。
 
-### 3.2 手动部署
+### 3.2 图形化部署助手（本机 → 服务器）
+
+不想记命令行的话用 `webapp/deploy/deploy_gui.py`：一个 Tkinter 桌面程序，填完服务器信息点一下，它自动完成**本地打包 → SFTP 上传 → 远端执行 `deploy.sh` → 健康检查**。
+
+![RADAR 部署助手界面](部署.png)
+
+界面上方填服务器信息（地址 / SSH 端口 / 用户名 / 认证方式 / 部署目录），中间选部署选项（部署模式、服务端口、是否上传代码、是否下载权重、HF 与 pip 镜像开关、是否 sudo），下方是实时日志、阶段进度与运行时长。建议先点「测试连接」——它只做握手与环境探测（系统、Docker、GPU、磁盘余量、是否已部署过），**不改动服务器上任何文件**。
+
+Windows 直接双击 `webapp/deploy/deploy_gui.bat`；其它平台：
+
+```bash
+python webapp/deploy/deploy_gui.py
+```
+
+首次运行需要 `paramiko`（SSH/SFTP）。程序检测到缺失时会在顶部给出「安装依赖」按钮，也可以自己装：
+
+```bash
+pip install paramiko
+```
+
+适用场景：本机（Windows / macOS）写代码，推到远端 Linux GPU 服务器。服务器**不需要**装 git、也不需要能访问 GitHub。
+
+它做的事：
+
+| 步骤 | 说明 |
+| --- | --- |
+| 打包 | 只打源码，压缩后约 2 MB；排除 `node_modules`、`runtime`、`DAMO-RADAR/data`、`ckpt`、`.git`、`.venv` |
+| 上传 | SFTP 传到部署目录，带进度条 |
+| 部署 | 远端执行 `bash webapp/deploy/deploy.sh <模式>`，输出实时回显到日志区 |
+| 验证 | 在服务器本机 curl `/api/health`，最多轮询 20 次 |
+
+几个刻意的取舍：
+
+- **带上前端产物**：`.gitignore` 排除了 `webapp/frontend/dist/`，但部署包必须包含它——否则服务器没装 Node 时连界面都出不来。本地缺 `dist` 时程序会直接报错并提示先 `npm run build`。
+- **不传模型权重**：`ckpt` 数 GB，走 SFTP 远不如让服务器自己下载。勾「下载模型权重」等价于加 `--download-ckpt`。
+- **首次连接自动信任主机公钥**（`AutoAddPolicy`）：内网自建服务器通常没有 `known_hosts` 记录，不这样设会直接抛 `HostKeyUnknown`。**代价是不校验服务器身份**；安全敏感场景请改用密钥认证，并事先把服务器公钥写入 `known_hosts`。
+- **密码默认不落盘**：勾选「记住密码」才会明文写进 `~/.radar_deploy.json`，公用电脑不要勾。
+- **sudo 密码不走命令行**：用 `sudo -S` 从 stdin 读取，避免出现在 `ps` 输出里。更推荐把用户加入 `docker` 组，彻底不用 sudo。
+
+只打包不连接（用来核对排除规则）：
+
+```bash
+python webapp/deploy/deploy_gui.py --package-only /tmp/radar.tar.gz
+```
+
+### 3.3 手动部署
 
 见 [`OPS.md`](OPS.md) §3.1（Docker Compose）与 §3.2（裸机）。
 
-### 3.3 架构（部署后是什么在跑）
+### 3.4 架构（部署后是什么在跑）
 
 ```
 浏览器 ──► nginx(:80/443, 可选) ──► uvicorn(:8000)
@@ -232,6 +279,11 @@ curl -s http://<host>:8000/api/cases/<case_id> | python -m json.tool
 | 前端资源加载失败/白屏 | 静态资源 MIME 或缓存异常 | 已在 `main.py` 修正 MIME 并加上 `Cache-Control`；若仍白屏请硬刷新（Ctrl+Shift+R） |
 | macOS 上强用 `docker` 模式 | `could not select device driver "nvidia"`，或 Rosetta 模拟下构建极慢 | 用 `bash webapp/deploy/deploy.sh macos`；脚本在 macOS 上也会自动改判 |
 | macOS 装 `torch==2.4.0+cu121` | `No matching distribution found` | `macos` 模式自动改走 PyPI 官方 CPU 轮子 |
+| 下权重报 `/usr/bin/python3: No module named pip` | Debian/Ubuntu 的 python3 不带 pip，且移除了 `ensurepip`（都是独立包），云主机上很常见 | 脚本会自动补齐 pip；补不上且是 docker 模式则改用容器下载（宿主机无需 pip）；都不行就手动 `sudo apt-get install -y python3-pip` |
+| `native` 模式报 `No module named venv` | 同上，`venv` 也是独立包 `python3-venv` | `sudo apt-get install -y python3-venv`；脚本会在环境检查阶段提前拦下 |
+| 下权重长时间没有任何输出，最后失败 | 直连 `huggingface.co` 在国内不可达；它的失败方式是**长时间挂起**而不是立刻报错，很容易被误判成卡死 | 脚本会先探测连通性，不通就自动切 `hf-mirror.com`，失败后还会换镜像重试一次；也可显式 `export HF_ENDPOINT=https://hf-mirror.com` |
+| 报 `UnsupportedProtocol: Request URL is missing an 'http://' or 'https://' protocol` | `HF_ENDPOINT` 被设成了**空串**（`export HF_ENDPOINT=` 或 docker 的 `-e HF_ENDPOINT=`），huggingface_hub 拿空字符串当端点，拼出 `/api/models/...` 这种没有协议的 URL | 脚本已处理：端点为空时不再传该变量，下载脚本内部也会清掉空值。排查时直接看日志里的 `HF endpoint: ...` 一行 |
+| 报 `CAS Client Error: HTTP status client error (401 Unauthorized), domain: https://cas-server.xethub.hf.co` | huggingface_hub 2.x 的大文件默认走 **Xet** 内容寻址存储，而 `hf-mirror.com` 这类镜像只代理传统 LFS，不认 Xet，于是 401 | 脚本已默认设 `HF_HUB_DISABLE_XET=1` 回退到传统下载；日志里 `xet: off` 表示生效。若要显式启用（海外直连时能提速），设 `HF_HUB_DISABLE_XET=0` |
 
 ---
 
