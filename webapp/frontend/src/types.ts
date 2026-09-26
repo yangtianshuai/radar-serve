@@ -118,6 +118,9 @@ export interface Health {
   queue_size: number
   missing_files: string[]
   detail: string
+  /** MONAI 实际注册到的图像 reader；缺 NibabelReader 时读不了 NIfTI */
+  image_readers: string[]
+  image_reader_ok: boolean
 }
 
 /** 单个标签的自有数据评估结果 */

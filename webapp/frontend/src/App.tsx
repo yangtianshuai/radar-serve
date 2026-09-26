@@ -18,6 +18,7 @@ const HEALTH_TEXT: Record<string, string> = {
   ready: '模型就绪',
   loading: '模型加载中',
   ckpt_missing: '权重缺失',
+  reader_missing: '影像读取库缺失',
 }
 
 const STATUS_TEXT: Record<string, string> = {
@@ -395,6 +396,24 @@ export default function App() {
               </ul>
             )}
           </details>
+        )}
+
+        {health?.status === 'reader_missing' && (
+          // 这个状态下服务能上传、能看切片，唯独推理读不了 NIfTI。
+          // 后端那条报错只列 reader 名字，用户很难猜到是缺了哪个包，所以写清楚。
+          <div className="banner error">
+            <div>
+              <strong>影像读取库缺失，推理暂不可用</strong>
+              <p>
+                服务能上传、能浏览切片，但推理读不了体数据——MONAI 只注册到{' '}
+                <code>{health.image_readers.join('、') || '（无）'}</code>。在服务器上执行：
+              </p>
+              <p>
+                <code>pip install nibabel</code>
+                ，然后重启服务。
+              </p>
+            </div>
+          </div>
         )}
 
         {error && (

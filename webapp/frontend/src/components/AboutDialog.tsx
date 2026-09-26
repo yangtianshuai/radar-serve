@@ -4,6 +4,7 @@ const HEALTH_TEXT: Record<string, string> = {
   ready: '模型就绪',
   loading: '模型加载中',
   ckpt_missing: '权重缺失',
+  reader_missing: '影像读取库缺失',
 }
 
 /**

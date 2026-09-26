@@ -140,3 +140,6 @@ class HealthResponse(BaseModel):
     queue_size: int = 0
     missing_files: list[str] = Field(default_factory=list)
     detail: str = ""
+    #: MONAI 实际注册到的图像 reader；缺 NibabelReader 时读不了 NIfTI
+    image_readers: list[str] = Field(default_factory=list)
+    image_reader_ok: bool = True

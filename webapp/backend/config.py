@@ -87,6 +87,37 @@ CORS_ORIGINS = [
 ]
 
 
+def image_reader_status() -> dict:
+    """检查 MONAI 有没有可用的 NIfTI 读取后端。
+
+    这类"可选依赖缺失"的表现特别隐蔽：服务能启动、能上传、预处理也正常
+    （那条链路直接走 SimpleITK），直到推理要加载体数据才报
+    `LoadImage cannot find a suitable reader`——而错误信息里只列出
+    NumpyReader / PILReader，很难联想到是少装了一个包。所以这里启动时就查，
+    并挂到 /api/health 上。
+    """
+    try:
+        from monai.transforms import LoadImage
+    except Exception as exc:
+        return {"ok": False, "readers": [], "detail": f"MONAI 不可用：{exc}"}
+
+    try:
+        readers = [type(r).__name__ for r in LoadImage().readers]
+    except Exception as exc:
+        return {"ok": False, "readers": [], "detail": f"初始化 LoadImage 失败：{exc}"}
+
+    # NumpyReader / PILReader 是恒定存在的兜底，只剩它们说明读不了 NIfTI
+    usable = [r for r in readers if r not in ("NumpyReader", "PILReader")]
+    if usable:
+        return {"ok": True, "readers": readers, "detail": ""}
+
+    return {
+        "ok": False,
+        "readers": readers,
+        "detail": "没有可用于 NIfTI 的 reader，请安装：pip install nibabel",
+    }
+
+
 def ensure_ckpt_ready() -> list[str]:
     """返回缺失的必要模型文件列表，为空表示就绪。"""
     required = [

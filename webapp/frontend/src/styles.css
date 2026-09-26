@@ -219,7 +219,8 @@ code {
 .dot.loading {
   background: var(--medium);
 }
-.dot.ckpt_missing {
+.dot.ckpt_missing,
+.dot.reader_missing {
   background: var(--high);
 }
 

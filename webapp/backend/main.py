@@ -75,6 +75,14 @@ def _warmup() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 图像读取后端缺失时服务照样能起、能上传，直到推理加载体数据才炸，
+    # 而且报错信息很难懂。所以在启动日志里先讲清楚。
+    readers = config.image_reader_status()
+    if readers["ok"]:
+        print(f"[radar] image readers: {', '.join(readers['readers'])}", flush=True)
+    else:
+        print(f"[radar] 警告：{readers['detail']}", flush=True)
+
     await task_manager.start()
     threading.Thread(target=_warmup, daemon=True).start()
     yield
@@ -640,10 +648,16 @@ async def health():
     from radar_engine import RadarEngine
 
     missing = config.ensure_ckpt_ready()
+    readers = config.image_reader_status()
     loaded = RadarEngine.peek() is not None
     if missing:
         status = "ckpt_missing"
         detail = "模型文件缺失，请先执行 DAMO-RADAR/download_scripts/download_checkpoints.py"
+    elif not readers["ok"]:
+        # 权重齐全但读不了影像。这个组合比缺权重更隐蔽：服务一切正常，
+        # 直到用户上传完点分析才失败
+        status = "reader_missing"
+        detail = readers["detail"]
     elif loaded:
         status = "ready"
         detail = ""
@@ -658,6 +672,8 @@ async def health():
         queue_size=task_manager.queue_size(),
         missing_files=missing,
         detail=detail,
+        image_readers=readers["readers"],
+        image_reader_ok=readers["ok"],
     )
 
 
