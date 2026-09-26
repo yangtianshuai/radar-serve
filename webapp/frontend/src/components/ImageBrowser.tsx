@@ -34,6 +34,11 @@ const WINDOW_THROTTLE_MS = 80
 /** 位移小于该像素值才算「点击定位」，否则视为拖动调窗 */
 const CLICK_SLOP_PX = 4
 
+/** 缩放范围与步进。放得太大只是把像素拉成方块，缩得太小又看不出内容 */
+const ZOOM_MIN = 0.3
+const ZOOM_MAX = 8
+const ZOOM_STEP = 1.15
+
 /** 比例尺候选长度（mm），取不超过图像宽度 1/4 的最大值 */
 const SCALE_CANDIDATES = [5, 10, 20, 50, 100, 200]
 
@@ -70,8 +75,20 @@ function clampIndex(value: number, size: number) {
 }
 
 /**
- * 单个视图的指针交互：拖动调窗 + 点击定位。
- * 两者共用一个指针手势，靠位移阈值区分，避免调窗时误触发定位。
+ * 把缩放与平移合成一个 transform。走 GPU 合成层，不触发重排，
+ * 所以拖着看也不会掉帧。十字线在这个容器内，会跟着图像一起走。
+ */
+function viewTransform(view: { zoom: number; offset: { x: number; y: number } }) {
+  return {
+    transform: `translate(${view.offset.x}px, ${view.offset.y}px) scale(${view.zoom})`,
+  }
+}
+
+/**
+ * 单个视图的指针交互：拖动调窗 + Shift 拖动平移 + 点击定位 + 缩放。
+ *
+ * 平移用 Shift 修饰而不是占用左键，是为了不破坏既有的肌肉记忆——左键拖动
+ * 调窗是所有 PACS 的默认动作。缩放走 Ctrl/⌘ + 滚轮，同样避开滚轮翻层。
  */
 function useViewport({
   ww,
@@ -87,8 +104,52 @@ function useViewport({
   onPick?: (fractionX: number, fractionY: number) => void
 }) {
   const [dragging, setDragging] = useState(false)
-  const origin = useRef<{ x: number; y: number; ww: number; wl: number } | null>(null)
+  const [panning, setPanning] = useState(false)
+  const [zoom, setZoom] = useState(1)
+  const [offset, setOffset] = useState({ x: 0, y: 0 })
+
+  // 手势与缩放状态放 ref：pointermove 触发频率很高，全程走 state 会不断重渲染。
+  // state 只用来驱动渲染，值本身以 ref 为准。
+  const origin = useRef<{
+    x: number
+    y: number
+    ww: number
+    wl: number
+    ox: number
+    oy: number
+    pan: boolean
+  } | null>(null)
   const moved = useRef(0)
+  const zoomRef = useRef(1)
+  const offsetRef = useRef({ x: 0, y: 0 })
+
+  /**
+   * 缩放。给了中心点（相对容器左上角）时，让该点在缩放前后保持不动——
+   * 这是滚轮缩放该有的手感，否则放大时图像会往中心跑。
+   */
+  const zoomBy = useCallback((factor: number, cx?: number, cy?: number) => {
+    const prev = zoomRef.current
+    const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, prev * factor))
+    if (Math.abs(next - prev) < 1e-6) return
+
+    const k = next / prev
+    const o = offsetRef.current
+    offsetRef.current =
+      cx === undefined || cy === undefined
+        ? o
+        : { x: cx - (cx - o.x) * k, y: cy - (cy - o.y) * k }
+
+    zoomRef.current = next
+    setZoom(next)
+    setOffset(offsetRef.current)
+  }, [])
+
+  const resetView = useCallback(() => {
+    zoomRef.current = 1
+    offsetRef.current = { x: 0, y: 0 }
+    setZoom(1)
+    setOffset({ x: 0, y: 0 })
+  }, [])
 
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return
@@ -97,7 +158,15 @@ function useViewport({
     } catch {
       // 部分环境（触摸、合成事件）不支持指针捕获；捕获失败不影响后续拖动
     }
-    origin.current = { x: e.clientX, y: e.clientY, ww, wl }
+    origin.current = {
+      x: e.clientX,
+      y: e.clientY,
+      ww,
+      wl,
+      ox: offsetRef.current.x,
+      oy: offsetRef.current.y,
+      pan: e.shiftKey,
+    }
     moved.current = 0
     setDragging(true)
   }
@@ -109,6 +178,19 @@ function useViewport({
     const dy = e.clientY - start.y
     moved.current = Math.max(moved.current, Math.abs(dx) + Math.abs(dy))
     if (moved.current <= CLICK_SLOP_PX) return
+
+    if (start.pan) {
+      // 平移限制在一屏之内：不然很容易把图像拖到完全看不见，还得想办法复位
+      const rect = e.currentTarget.getBoundingClientRect()
+      offsetRef.current = {
+        x: Math.min(Math.max(start.ox + dx, -rect.width), rect.width),
+        y: Math.min(Math.max(start.oy + dy, -rect.height), rect.height),
+      }
+      setOffset(offsetRef.current)
+      setPanning(true)
+      return
+    }
+
     onWindow(
       clampNumber(start.ww + dx * WW_PER_PX, WW_RANGE),
       clampNumber(start.wl + dy * WL_PER_PX, WL_RANGE),
@@ -116,11 +198,14 @@ function useViewport({
   }
 
   const onPointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {
-    if (!origin.current) return
+    const start = origin.current
+    if (!start) return
     const wasDrag = moved.current > CLICK_SLOP_PX
     origin.current = null
     setDragging(false)
-    onFlush()
+    setPanning(false)
+    // 只有调窗需要把节流中的值立刻落地，平移没有待提交的东西
+    if (!start.pan) onFlush()
     try {
       if (e.currentTarget.hasPointerCapture(e.pointerId)) {
         e.currentTarget.releasePointerCapture(e.pointerId)
@@ -137,7 +222,12 @@ function useViewport({
   }
 
   return {
-    dragging,
+    dragging: dragging && !panning,
+    panning,
+    zoom,
+    offset,
+    zoomBy,
+    resetView,
     handlers: {
       onPointerDown,
       onPointerMove,
@@ -271,12 +361,26 @@ export default function ImageBrowser({
     onPick: pickOnSagittal,
   })
 
-  // 滚轮翻层：各视图各管一个方向
+  // 滚轮：默认翻层，按住 Ctrl/⌘ 则缩放（以指针位置为中心）
   const bindWheel = useCallback(
-    (el: HTMLDivElement | null, step: (direction: number) => void) => {
+    (
+      el: HTMLDivElement | null,
+      step: (direction: number) => void,
+      zoomBy: (factor: number, cx?: number, cy?: number) => void,
+    ) => {
       if (!el) return undefined
       const handler = (e: WheelEvent) => {
+        // 必须拦下默认行为：不拦的话 Ctrl+滚轮会缩放整个页面，对阅片是灾难
         e.preventDefault()
+        if (e.ctrlKey || e.metaKey) {
+          const rect = el.getBoundingClientRect()
+          zoomBy(
+            e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP,
+            e.clientX - rect.left,
+            e.clientY - rect.top,
+          )
+          return
+        }
         const now = Date.now()
         if (now - wheelLock.current < 60) return
         wheelLock.current = now
@@ -294,24 +398,30 @@ export default function ImageBrowser({
 
   useEffect(
     () =>
-      bindWheel(axialRef.current, (dir) =>
-        setAxial((i) => clampIndex(i + dir, zSize)),
+      bindWheel(
+        axialRef.current,
+        (dir) => setAxial((i) => clampIndex(i + dir, zSize)),
+        axialView.zoomBy,
       ),
-    [bindWheel, zSize],
+    [bindWheel, zSize, axialView.zoomBy],
   )
   useEffect(
     () =>
-      bindWheel(coronalRef.current, (dir) =>
-        setCoronal((i) => clampIndex(i + dir, ySize)),
+      bindWheel(
+        coronalRef.current,
+        (dir) => setCoronal((i) => clampIndex(i + dir, ySize)),
+        coronalView.zoomBy,
       ),
-    [bindWheel, ySize],
+    [bindWheel, ySize, coronalView.zoomBy],
   )
   useEffect(
     () =>
-      bindWheel(sagittalRef.current, (dir) =>
-        setSagittal((i) => clampIndex(i + dir, xSize)),
+      bindWheel(
+        sagittalRef.current,
+        (dir) => setSagittal((i) => clampIndex(i + dir, xSize)),
+        sagittalView.zoomBy,
       ),
-    [bindWheel, xSize],
+    [bindWheel, xSize, sagittalView.zoomBy],
   )
 
   const axialUrl = api.sliceUrl(caseId, axial, { ww, wl })
@@ -380,6 +490,13 @@ export default function ImageBrowser({
     applyPreset(presetKey === CUSTOM_KEY ? 'abdomen' : presetKey)
   }
 
+  /** 三个视图的缩放平移各自独立，所以复位要一起做 */
+  const resetAllViews = () => {
+    axialView.resetView()
+    coronalView.resetView()
+    sagittalView.resetView()
+  }
+
   const sliceThickness = spacing?.[0]
   const positionMm = sliceThickness !== undefined ? (axial + 0.5) * sliceThickness : undefined
 
@@ -416,14 +533,15 @@ export default function ImageBrowser({
       <div className="mpr-grid">
         <figure className="mpr-view mpr-axial">
           <div
-            className="browser-stage"
+            className={`browser-stage ${axialView.panning ? 'panning' : ''}`}
             ref={axialRef}
             tabIndex={0}
             onKeyDown={handleKeyDown}
+            onDoubleClick={axialView.resetView}
             {...axialView.handlers}
-            title="按住左键拖动调窗；滚轮或方向键翻层"
+            title="左键拖动调窗 · Shift+拖动平移 · Ctrl+滚轮缩放 · 滚轮或方向键翻层 · 双击复位"
           >
-            <div className="stage-canvas">
+            <div className="stage-canvas" style={viewTransform(axialView)}>
               <img
                 src={axialUrl}
                 alt={`轴位第 ${axial + 1} 层`}
@@ -439,6 +557,9 @@ export default function ImageBrowser({
               </div>
             )}
             {loading && !axialView.dragging && <span className="browser-loading">加载中…</span>}
+            {axialView.zoom !== 1 && (
+              <span className="browser-zoom">×{axialView.zoom.toFixed(2)}</span>
+            )}
             {showBadge(axialView.dragging)}
           </div>
           <figcaption>
@@ -457,15 +578,19 @@ export default function ImageBrowser({
 
         <figure className="mpr-view">
           <div
-            className="browser-stage small"
+            className={`browser-stage small ${coronalView.panning ? 'panning' : ''}`}
             ref={coronalRef}
+            onDoubleClick={coronalView.resetView}
             {...coronalView.handlers}
-            title="按住拖动调窗；点击可定位到对应层"
+            title="拖动调窗 · Shift+拖动平移 · Ctrl+滚轮缩放 · 点击定位 · 双击复位"
           >
-            <div className="stage-canvas">
+            <div className="stage-canvas" style={viewTransform(coronalView)}>
               <img src={coronalUrl} alt={`冠状第 ${coronal + 1} 层`} draggable={false} />
               <Crosshair x={ratio(sagittal, xSize)} y={ratio(axial, zSize)} />
             </div>
+            {coronalView.zoom !== 1 && (
+              <span className="browser-zoom">×{coronalView.zoom.toFixed(2)}</span>
+            )}
             {showBadge(coronalView.dragging)}
           </div>
           <figcaption>
@@ -484,15 +609,19 @@ export default function ImageBrowser({
 
         <figure className="mpr-view">
           <div
-            className="browser-stage small"
+            className={`browser-stage small ${sagittalView.panning ? 'panning' : ''}`}
             ref={sagittalRef}
+            onDoubleClick={sagittalView.resetView}
             {...sagittalView.handlers}
-            title="按住拖动调窗；点击可定位到对应层"
+            title="拖动调窗 · Shift+拖动平移 · Ctrl+滚轮缩放 · 点击定位 · 双击复位"
           >
-            <div className="stage-canvas">
+            <div className="stage-canvas" style={viewTransform(sagittalView)}>
               <img src={sagittalUrl} alt={`矢状第 ${sagittal + 1} 层`} draggable={false} />
               <Crosshair x={ratio(coronal, ySize)} y={ratio(axial, zSize)} />
             </div>
+            {sagittalView.zoom !== 1 && (
+              <span className="browser-zoom">×{sagittalView.zoom.toFixed(2)}</span>
+            )}
             {showBadge(sagittalView.dragging)}
           </div>
           <figcaption>
@@ -559,8 +688,12 @@ export default function ImageBrowser({
           重置窗位
         </button>
 
+        <button type="button" className="ghost" onClick={resetAllViews}>
+          复位视图
+        </button>
+
         <span className="muted browser-hint">
-          拖动调窗 · 滚轮/↑↓ 翻层 · 点冠状/矢状图定位
+          拖动调窗 · 滚轮/↑↓ 翻层 · Ctrl+滚轮缩放 · Shift+拖动平移 · 双击复位 · 点冠状/矢状图定位
         </span>
       </div>
     </section>

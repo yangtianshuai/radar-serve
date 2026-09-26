@@ -94,6 +94,8 @@ class CaseStatus(BaseModel):
     queue_position: int | None = None
     #: 已收到取消请求但尚未落到终态，前端据此显示「取消中」
     cancel_requested: bool = False
+    #: 任务已耗时（秒），从上传完成算起。运行中随轮询增长，终态后定格
+    elapsed_sec: float = 0.0
 
 
 class CaseBrief(BaseModel):

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # RADAR Web 服务镜像（多阶段：构建 React 前端 + GPU 推理后端）
 # 构建上下文必须是项目根目录：
 #   docker build -f webapp/deploy/Dockerfile -t radar-web .
@@ -33,11 +34,17 @@ WORKDIR /app
 # 层失效，于是每次部署都重新下载几个 GB。
 COPY webapp/backend/requirements.txt ./backend/requirements.txt
 
-# torch 需要与基础镜像 CUDA 版本匹配的轮子，换 CUDA 版本时同步修改这里
-RUN python3 -m pip install --no-cache-dir --upgrade pip \
- && python3 -m pip install --no-cache-dir \
+# torch 需要与基础镜像 CUDA 版本匹配的轮子，换 CUDA 版本时同步修改这里。
+#
+# 用 BuildKit 的 cache mount 把 pip 的下载缓存挂进来：层缓存一旦失效（改了
+# requirements 或 Dockerfile 就会），wheel 仍能从本地缓存直接取，不必再下那几个
+# GB。注意这里**不能**加 --no-cache-dir，否则等于把缓存关掉。
+# 缓存目录不写进镜像层，所以镜像体积不受影响。
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    python3 -m pip install --upgrade pip \
+ && python3 -m pip install \
       torch==2.4.0+cu121 --index-url https://download.pytorch.org/whl/cu121 \
- && python3 -m pip install --no-cache-dir -r backend/requirements.txt
+ && python3 -m pip install -r backend/requirements.txt
 
 # 代码放最后。这几个 COPY 变得最频繁，重活都由上面的层缓存兜住了。
 # 镜像内保持 DAMO_RADAR_DIR=/app，使 RADAR_inference 落在 /app/RADAR_inference

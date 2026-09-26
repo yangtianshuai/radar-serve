@@ -2312,6 +2312,31 @@ details.banner > p {
   width: 1px;
 }
 
+/* ---------------- 缩放与平移 ---------------- */
+/* transform 走 GPU 合成层；提前提层可以避免拖动时反复光栅化 */
+.stage-canvas {
+  will-change: transform;
+}
+
+/* 缩放比例徽标：只在非 1:1 时出现，不干扰常态阅片 */
+.browser-zoom {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.62);
+  color: #e2e8f0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+/* 平移中给出「正在抓着图像」的手感 */
+.browser-stage.panning {
+  cursor: grabbing;
+}
+
 /* ---------------- 统计置信区间 ---------------- */
 .stats-ci {
   color: var(--muted);

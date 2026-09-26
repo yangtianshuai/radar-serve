@@ -397,10 +397,28 @@ build_frontend() {
 # ---------------------------------------------------------------- 启动
 start_docker() {
   step "构建并启动容器"
+  c_info "镜像构建日志里出现 CACHED 就说明那一层复用了缓存，没有重新下载"
   cd "$ROOT/webapp/deploy"
   docker compose up -d --build
   cd "$ROOT"
   c_ok "容器已启动"
+
+  # 容器起来后确认它真的拿到了 GPU。只看宿主机的 nvidia-smi 是不够的：
+  # compose 的 deploy.resources.reservations 在旧版 compose 上会被**静默忽略**，
+  # 结果就是"明明有 GPU 却在 CPU 上慢慢跑"，而且一路没有任何报错。
+  local i
+  for i in $(seq 1 10); do
+    if docker exec radarserve nvidia-smi >/dev/null 2>&1; then
+      c_ok "容器内 GPU 可用"
+      return 0
+    fi
+    sleep 2
+  done
+
+  c_warn "容器内看不到 GPU，推理会退化到 CPU。请确认："
+  c_warn "  1) 宿主机已装 NVIDIA Container Toolkit"
+  c_warn "  2) docker-compose.yml 的 deploy.resources.reservations.devices 生效"
+  c_warn "     （compose 版本过旧会被静默忽略，可改用 gpus: all，需 v2.30+）"
 }
 
 install_torch() {

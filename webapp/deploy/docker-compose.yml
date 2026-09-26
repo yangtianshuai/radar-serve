@@ -18,6 +18,10 @@ services:
       RADAR_DATA_DIR: /data
       RADAR_DEVICE: cuda
       RADAR_MAX_UPLOAD_MB: "2048"
+    # GPU 直通。注意：旧版 docker compose 会**静默忽略**下面这段，
+    # 症状是容器里看不到 GPU、推理退化到 CPU，却没有任何报错。
+    # deploy.sh 在启动后会 docker exec nvidia-smi 验证一次。
+    # 若你的 compose 较旧（< v2.30），可把这段换成一行 `gpus: all`。
     deploy:
       resources:
         reservations:

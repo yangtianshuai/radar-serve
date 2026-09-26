@@ -77,6 +77,8 @@ export interface CaseStatus {
   queue_position: number | null
   /** 已请求取消、但任务还在跑（等当前步骤结束） */
   cancel_requested: boolean
+  /** 任务已耗时（秒），从创建算起含排队；终态后定格 */
+  elapsed_sec: number
 }
 
 export interface CaseBrief {

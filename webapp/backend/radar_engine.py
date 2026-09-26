@@ -324,10 +324,43 @@ class RadarEngine:
     _instance: "RadarEngine | None" = None
     _lock = threading.Lock()
 
-    def __init__(self) -> None:
-        self.device = torch.device(
-            config.DEVICE if torch.cuda.is_available() or config.DEVICE == "cpu" else "cpu"
+    @staticmethod
+    def _resolve_device() -> torch.device:
+        """决定实际使用的设备，并把结论打到日志里。
+
+        `RADAR_DEVICE=cuda` 但 CUDA 不可用时**绝不能静默退回 CPU**：3D 滑窗在
+        CPU 上单例要跑几十分钟，用户只会觉得"怎么这么慢"，而不会想到是 GPU
+        压根没启用。所以这里把原因和排查方向直接说出来。
+        """
+        requested = config.DEVICE
+
+        if requested == "cpu":
+            print("[radar] RADAR_DEVICE=cpu，按配置使用 CPU", flush=True)
+            return torch.device("cpu")
+
+        if torch.cuda.is_available():
+            print(
+                f"[radar] 使用 GPU：{torch.cuda.get_device_name(0)}"
+                f"（torch {torch.__version__}, CUDA {torch.version.cuda}）",
+                flush=True,
+            )
+            return torch.device(requested)
+
+        print(
+            f"[radar] 警告：RADAR_DEVICE={requested}，但 torch 看不到可用 GPU，"
+            "已回退到 CPU。\n"
+            "[radar] 3D 滑窗在 CPU 上单例可能耗时数十分钟，请按顺序排查：\n"
+            "[radar]   1) 容器是否拿到 GPU：docker exec <容器名> nvidia-smi\n"
+            "[radar]   2) 宿主机是否装了 NVIDIA Container Toolkit，且 compose 里的\n"
+            "[radar]      deploy.resources.reservations.devices 生效\n"
+            "[radar]   3) 驱动版本是否支持 CUDA 12.1（需要 >= 525）\n"
+            f"[radar]   torch={torch.__version__}, 编译时 CUDA={torch.version.cuda}",
+            flush=True,
         )
+        return torch.device("cpu")
+
+    def __init__(self) -> None:
+        self.device = self._resolve_device()
         self.pad_func = transforms.DivisiblePadd(
             keys=["image", "label"], k=32, mode="constant",
             constant_values=0, method="end",

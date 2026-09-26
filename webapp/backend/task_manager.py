@@ -56,6 +56,25 @@ _STAGE_TEXT = {
     "done": "完成",
 }
 
+
+def _elapsed_sec(rec: dict) -> float:
+    """任务已耗时（秒），从创建算起（含排队）。
+
+    运行中用「现在 - 创建时间」实时增长；到了终态就改用 updated_at 定格——
+    否则它会在每次轮询时继续变大，看起来像任务还没结束。前端拿这个值之后
+    还会按秒自己补差值，所以这里的精度只影响校准频率。
+    """
+    start = _parse_iso(rec.get("created_at", ""))
+    if start is None:
+        return 0.0
+
+    if rec.get("status") in _TERMINAL:
+        end = _parse_iso(rec.get("updated_at", "")) or start
+    else:
+        end = datetime.now(timezone.utc).timestamp()
+
+    return max(end - start, 0.0)
+
 #: 过期结果清理的扫描间隔（秒）
 _CLEANUP_INTERVAL_SEC = 3600
 
@@ -463,6 +482,7 @@ class TaskManager:
             available_series=[SeriesOption(**s) for s in rec.get("available_series", [])],
             volume=VolumeMeta(**rec["volume"]) if rec.get("volume") else None,
             preview_count=int(rec.get("preview_count", 0)),
+            elapsed_sec=_elapsed_sec(rec),
             result=CaseResult(**result) if result else None,
             annotation=CaseAnnotation(**annotation) if annotation else None,
             queue_position=self.queue_position(rec["case_id"]),
